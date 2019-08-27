@@ -7,6 +7,40 @@ import cv2
 import numpy as np
 from retinaface import RetinaFace
 
+
+def letterbox(img, new_shape=416, color=(128, 128, 128), mode='square'):
+    # Resize a rectangular image to a 32 pixel multiple rectangle
+    # https://github.com/ultralytics/yolov3/issues/232
+    shape = img.shape[:2]  # current shape [height, width]
+
+    if isinstance(new_shape, int):
+        ratio = float(new_shape) / max(shape)
+    else:
+        ratio = max(new_shape) / max(shape)  # ratio  = new / old
+    ratiow, ratioh = ratio, ratio
+    new_unpad = (int(round(shape[1] * ratio)), int(round(shape[0] * ratio)))
+
+    # Compute padding https://github.com/ultralytics/yolov3/issues/232
+    if mode is 'auto':  # minimum rectangle
+        dw = np.mod(new_shape - new_unpad[0], 32) / 2  # width padding
+        dh = np.mod(new_shape - new_unpad[1], 32) / 2  # height padding
+    elif mode is 'square':  # square
+        dw = (new_shape - new_unpad[0]) / 2  # width padding
+        dh = (new_shape - new_unpad[1]) / 2  # height padding
+    elif mode is 'rect':  # square
+        dw = (new_shape[1] - new_unpad[0]) / 2  # width padding
+        dh = (new_shape[0] - new_unpad[1]) / 2  # height padding
+    elif mode is 'scaleFill':
+        dw, dh = 0.0, 0.0
+        new_unpad = (new_shape, new_shape)
+        ratiow, ratioh = new_shape / shape[1], new_shape / shape[0]
+
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_AREA)  # resized, no border
+    img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # padded square
+    return img, ratiow, ratioh, dw, dh
+
 gen_type = os.environ.get("gen_type")
 
 
@@ -25,6 +59,7 @@ os.makedirs(output_image_dir)
 
 thresh = 0.8
 gpuid = 0
+input_shape = 1024
 detector = RetinaFace('./model/R50', 0, gpuid, 'net3')
 with open(in_file, 'r') as f:
     img_files = f.read().splitlines()
@@ -40,44 +75,35 @@ with open(in_file, 'r') as f:
                         has_person = True
                         y = np.vstack((y, [x[i, :]])) if y is not None else np.array([x[i, :]])
                 if has_person:
-                    scales = [1024, 1980]
                     img = cv2.imread(img_file)
                     width = img.shape[1]
                     height = img.shape[0]
-                    im_shape = img.shape
-                    target_size = scales[0]
-                    max_size = scales[1]
-                    im_size_min = np.min(im_shape[0:2])
-                    im_size_max = np.max(im_shape[0:2])
-                    # im_scale = 1.0
-                    # if im_size_min>target_size or im_size_max>max_size:
-                    im_scale = float(target_size) / float(im_size_min)
-                    # prevent bigger axis from being more than max_size:
-                    if np.round(im_scale * im_size_max) > max_size:
-                        im_scale = float(max_size) / float(im_size_max)
-                    scales = [im_scale]
-                    flip = False
-                    faces, landmarks = detector.detect(img, thresh, scales=scales, do_flip=flip)
+                    input_img, ratiow, ratioh, padw, padh = letterbox(img, new_shape=input_shape, mode='square')
+                    faces, landmarks = detector.detect(input_img, thresh, scales=[1.0], do_flip=False)
                     if faces is not None:
                         print('find', faces.shape[0], 'faces')
                         for i in range(faces.shape[0]):
                             # print('score', faces[i][4])
                             box = faces[i]
-                            Cx = (box[0] + box[2])/2/width
-                            Cy = (box[1] + box[3])/2/height
-                            normalized_width = (box[2] - box[0]) / width
-                            normalized_height = (box[3] - box[1]) / height
+                            x0 = (box[0]-padw)/ratiow
+                            x1 = (box[2]-padw)/ratiow
+                            y0 = (box[1]-padh)/ratioh
+                            y1 = (box[3]-padh)/ratioh
+                            Cx = (x0 + x1)/2/width
+                            Cy = (y0 + y1)/2/height
+                            normalized_width = (x1 - x0) / width
+                            normalized_height = (y1 - y0) / height
                             y = np.vstack((y, np.array([[1, Cx, Cy, normalized_width, normalized_height]])))
-                        # for i in range(y.shape[0]):
-                        #     if y[i, 0] == 0:
-                        #         color = (0, 0, 255)
-                        #     else:
-                        #         color = (255, 0, 0)
-                        #     x0 = (y[i, 1] - y[i, 3]/2) * width
-                        #     y0 = (y[i, 2] - y[i, 4]/2) * height
-                        #     x1 = (y[i, 1] + y[i, 3]/2) * width
-                        #     y1 = (y[i, 2] + y[i, 4]/2) * height
-                        #     cv2.rectangle(img, (int(x0), int(y0)), (int(x1), int(y1)), color, 2)
+                    #     for i in range(y.shape[0]):
+                    #         if y[i, 0] == 0:
+                    #             color = (0, 0, 255)
+                    #         else:
+                    #             color = (255, 0, 0)
+                    #         x0 = (y[i, 1] - y[i, 3]/2) * width
+                    #         y0 = (y[i, 2] - y[i, 4]/2) * height
+                    #         x1 = (y[i, 1] + y[i, 3]/2) * width
+                    #         y1 = (y[i, 2] + y[i, 4]/2) * height
+                    #         cv2.rectangle(img, (int(x0), int(y0)), (int(x1), int(y1)), color, 2)
                     # cv2.imshow("cam", img)
                     # cv2.waitKey(-1)
 
